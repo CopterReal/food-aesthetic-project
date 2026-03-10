@@ -1,0 +1,76 @@
+{
+  "img_size": [
+    224,
+    224
+  ],
+  "csv_path": "F:\\cmu-work\\CMU-work\\food_aesthetic_project\\Data\\data_from_questionaire.csv",
+  "feature_extractor_path": "F:\\cmu-work\\CMU-work\\food_aesthetic_project\\models\\feature_extractor.keras",
+  "classifier_path": "F:\\cmu-work\\CMU-work\\food_aesthetic_project\\models\\pairwise_classifier.pkl",
+  "menu_to_folder": {
+    "sushi": "sushi",
+    "ramen": "ramen",
+    "pizza": "pizza",
+    "burger": "hamburger",
+    "hamburger": "hamburger",
+    "dessert": "dessert"
+  },
+  "basic_handcrafted_features": [
+    "brightness_mean",
+    "brightness_std",
+    "brightness_p10",
+    "brightness_p90",
+    "saturation_mean",
+    "saturation_std",
+    "value_mean",
+    "sharpness",
+    "colorfulness",
+    "center_brightness",
+    "center_contrast"
+  ],
+  "advanced_food_features": [
+    "center_emphasis",
+    "focus_contrast",
+    "edge_density",
+    "foreground_ratio",
+    "empty_space_ratio",
+    "warm_ratio",
+    "hue_std",
+    "sat_balance",
+    "analogous_score",
+    "complementary_score",
+    "symmetry_score",
+    "thirds_emphasis",
+    "color_separation"
+  ],
+  "pair_feature_mode": "cnn_abs_diff + hc_diff + hc_abs_diff + one_hot_category",
+  "label_definition": {
+    "1": "Image 1 wins",
+    "0": "Image 2 wins"
+  },
+  "symmetry_augmentation": true,
+  "cross_validation": {
+    "n_splits": 5,
+    "scores": [
+      0.575,
+      0.645,
+      0.655,
+      0.645,
+      0.625
+    ],
+    "mean_accuracy": 0.629,
+    "std_accuracy": 0.028705400188814675
+  },
+  "best_xgboost_config": {
+    "n_estimators": 450,
+    "max_depth": 4,
+    "learning_rate": 0.022,
+    "subsample": 0.82,
+    "colsample_bytree": 0.7,
+    "reg_lambda": 3.5,
+    "min_child_weight": 3,
+    "gamma": 0.2,
+    "random_state": 52
+  },
+  "classifier": "xgboost",
+  "predict_mode": "bidirectional_probability"
+}
