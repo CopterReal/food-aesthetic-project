@@ -3,17 +3,35 @@
     224,
     224
   ],
-  "csv_path": "F:\\cmu-work\\CMU-work\\food_aesthetic_project\\Data\\data_from_questionaire.csv",
+  "questionnaire_csv_path": "F:\\cmu-work\\CMU-work\\food_aesthetic_project\\Data\\data_from_questionaire.csv",
+  "instagram_csv_path": "F:\\cmu-work\\CMU-work\\food_aesthetic_project\\Data\\data_from_intragram.csv",
   "feature_extractor_path": "F:\\cmu-work\\CMU-work\\food_aesthetic_project\\models\\feature_extractor.keras",
   "classifier_path": "F:\\cmu-work\\CMU-work\\food_aesthetic_project\\models\\pairwise_classifier.pkl",
   "menu_to_folder": {
     "sushi": "sushi",
     "ramen": "ramen",
     "pizza": "pizza",
-    "burger": "hamburger",
-    "hamburger": "hamburger",
+    "burger": "burger",
+    "hamburger": "burger",
     "dessert": "dessert"
   },
+  "valid_menus": [
+    "burger",
+    "dessert",
+    "pizza",
+    "ramen",
+    "sushi"
+  ],
+  "all_images_used_count": 28891,
+  "image_count_per_menu": {
+    "ramen": 5757,
+    "pizza": 4473,
+    "sushi": 5201,
+    "burger": 8743,
+    "dessert": 4717
+  },
+  "true_pair_count": 765,
+  "final_pseudo_pair_count": 1131,
   "basic_handcrafted_features": [
     "brightness_mean",
     "brightness_std",
@@ -42,35 +60,66 @@
     "thirds_emphasis",
     "color_separation"
   ],
-  "pair_feature_mode": "cnn_abs_diff + hc_diff + hc_abs_diff + one_hot_category",
+  "pair_feature_mode": "cnn_abs_diff + cnn_diff_head64 + hc_diff + hc_abs_diff + hc_mean + one_hot_category",
   "label_definition": {
     "1": "Image 1 wins",
     "0": "Image 2 wins"
   },
-  "symmetry_augmentation": true,
-  "cross_validation": {
+  "true_only_cross_validation": {
     "n_splits": 5,
     "scores": [
-      0.575,
-      0.645,
-      0.655,
-      0.645,
-      0.625
+      0.6241830065359477,
+      0.5718954248366013,
+      0.5849673202614379,
+      0.5784313725490197,
+      0.6633986928104575
     ],
-    "mean_accuracy": 0.629,
-    "std_accuracy": 0.028705400188814675
+    "mean_accuracy": 0.6045751633986928,
+    "std_accuracy": 0.03458498445836065
   },
-  "best_xgboost_config": {
-    "n_estimators": 450,
+  "pseudo_assisted_cross_validation": {
+    "n_splits": 5,
+    "scores": [
+      0.6176470588235294,
+      0.5686274509803921,
+      0.5980392156862745,
+      0.6176470588235294,
+      0.6045751633986928
+    ],
+    "mean_accuracy": 0.6013071895424836,
+    "std_accuracy": 0.018018364381817302,
+    "pseudo_pair_counts": [
+      1230,
+      1070,
+      1124,
+      1157,
+      1212
+    ],
+    "pseudo_pair_count_mean": 1158.6
+  },
+  "pseudo_labeling": {
+    "enabled": true,
+    "anchors_per_menu": 16,
+    "max_pseudo_pairs_per_menu": 250,
+    "pseudo_min_score_gap": 0.25,
+    "pseudo_base_weight": 0.18,
+    "min_images_per_menu_for_pseudo": 50,
+    "note": "validation-fold images are excluded from pseudo generation during CV"
+  },
+  "xgboost_config": {
+    "n_estimators": 320,
     "max_depth": 4,
-    "learning_rate": 0.022,
+    "learning_rate": 0.03,
     "subsample": 0.82,
-    "colsample_bytree": 0.7,
-    "reg_lambda": 3.5,
-    "min_child_weight": 3,
-    "gamma": 0.2,
-    "random_state": 52
+    "colsample_bytree": 0.72,
+    "reg_lambda": 4.0,
+    "reg_alpha": 0.2,
+    "min_child_weight": 4,
+    "gamma": 0.25,
+    "random_state": 42
   },
   "classifier": "xgboost",
-  "predict_mode": "bidirectional_probability"
+  "predict_mode": "bidirectional_probability",
+  "strict_same_category_check": true,
+  "final_sanity_check_accuracy_on_true_pairs": 0.9797385620915032
 }

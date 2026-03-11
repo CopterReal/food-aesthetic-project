@@ -205,3 +205,18 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ========================
+# Project: food aesthetic
+# ========================
+
+# Dataset (รูปเยอะ ไม่ควรขึ้น Git)
+Data/
+
+# Trained models (ไฟล์ใหญ่)
+models/*.keras
+models/*.pkl
+
+# Optional cache
+*.npy
+*.npz

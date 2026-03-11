@@ -22,12 +22,15 @@ METADATA_PATH = MODELS_DIR / "metadata.json"
 
 IMG_SIZE = (224, 224)
 
+VALID_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+VALID_MENUS = {"sushi", "ramen", "pizza", "burger", "dessert"}
+
 MENU_TO_FOLDER = {
     "sushi": "sushi",
     "ramen": "ramen",
     "pizza": "pizza",
-    "burger": "hamburger",
-    "hamburger": "hamburger",
+    "burger": "burger",
+    "hamburger": "burger",
     "dessert": "dessert",
 }
 
@@ -40,30 +43,56 @@ def normalize_menu_name(menu_name: str) -> str:
     return MENU_TO_FOLDER.get(menu, menu)
 
 
+def get_menu_from_path(image_path: str) -> str:
+    p = Path(image_path)
+    folder = p.parent.name.strip().lower()
+    return normalize_menu_name(folder)
+
+
 def build_image_index(root_dir: Path) -> dict:
     image_index = {}
-    valid_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
     for p in root_dir.rglob("*"):
-        if p.is_file() and p.suffix.lower() in valid_ext:
-            image_index[p.name] = str(p)
+        if p.is_file() and p.suffix.lower() in VALID_EXT:
+            key = p.name.lower()
+            image_index.setdefault(key, []).append(str(p))
 
     return image_index
 
 
-def infer_menu_from_filename(image_name: str, training_index: dict) -> str:
-    if image_name in training_index:
-        p = Path(training_index[image_name])
-        return p.parent.name.lower()
-    return "unknown"
+def infer_menu_from_path(image_path: str) -> str:
+    return get_menu_from_path(image_path)
 
 
-def resolve_test_image_path(image_name: str, test_image_index: dict, training_image_index: dict) -> str:
-    if image_name in test_image_index:
-        return test_image_index[image_name]
-    if image_name in training_image_index:
-        return training_image_index[image_name]
-    raise FileNotFoundError(f"Cannot find image: {image_name}")
+def resolve_test_image_path(image_name: str, test_image_index: dict, training_image_index: dict, expected_menu: str = None) -> str:
+    image_name = str(image_name).strip()
+    image_key = image_name.lower()
+    expected_menu = normalize_menu_name(expected_menu) if expected_menu is not None else None
+
+    candidates = []
+
+    if image_key in test_image_index:
+        candidates.extend(test_image_index[image_key])
+
+    if image_key in training_image_index:
+        candidates.extend(training_image_index[image_key])
+
+    if not candidates:
+        raise FileNotFoundError(f"Cannot find image: {image_name}")
+
+    if expected_menu is not None:
+        same_menu = [p for p in candidates if get_menu_from_path(p) == expected_menu]
+        if len(same_menu) == 1:
+            return same_menu[0]
+        if len(same_menu) > 1:
+            raise ValueError(
+                f"Ambiguous test image '{image_name}' for menu '{expected_menu}': {same_menu}"
+            )
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    raise ValueError(f"Ambiguous image '{image_name}', candidates={candidates}")
 
 
 # =========================
@@ -237,9 +266,9 @@ def compute_advanced_food_features(image_path: str) -> np.ndarray:
     empty_space_ratio = float(np.mean(empty_mask))
 
     warm_mask = (
-        (hue < 0.12) |
-        ((hue > 0.90) & (hue <= 1.0)) |
-        ((hue > 0.12) & (hue < 0.18))
+        (hue < 0.12)
+        | ((hue > 0.90) & (hue <= 1.0))
+        | ((hue > 0.12) & (hue < 0.18))
     )
     warm_ratio = float(np.mean(warm_mask))
 
@@ -316,7 +345,7 @@ def extract_hc_feature_cached(image_path: str, cache: dict) -> np.ndarray:
 # PAIR FEATURE
 # =========================
 def get_category_one_hot(menu_name: str) -> np.ndarray:
-    categories = ["sushi", "ramen", "pizza", "hamburger", "dessert"]
+    categories = ["sushi", "ramen", "pizza", "burger", "dessert"]
     menu_norm = normalize_menu_name(menu_name)
 
     one_hot = np.zeros(len(categories), dtype=np.float32)
@@ -389,13 +418,34 @@ def main():
         img1_name = row["Image 1"]
         img2_name = row["Image 2"]
 
+        menu_name_from_csv = None
         if "Menu" in df.columns and pd.notna(row["Menu"]):
-            menu_name = str(row["Menu"])
-        else:
-            menu_name = infer_menu_from_filename(img1_name, training_image_index)
+            menu_name_from_csv = str(row["Menu"])
 
-        img1_path = resolve_test_image_path(img1_name, test_image_index, training_image_index)
-        img2_path = resolve_test_image_path(img2_name, test_image_index, training_image_index)
+        img1_path = resolve_test_image_path(
+            img1_name, test_image_index, training_image_index, expected_menu=menu_name_from_csv
+        )
+        img2_path = resolve_test_image_path(
+            img2_name, test_image_index, training_image_index, expected_menu=menu_name_from_csv
+        )
+
+        menu1 = get_menu_from_path(img1_path)
+        menu2 = get_menu_from_path(img2_path)
+
+        if menu1 != menu2:
+            raise ValueError(
+                f"[row {idx}] category mismatch: "
+                f"{img1_name} -> {menu1}, {img2_name} -> {menu2}"
+            )
+
+        if menu_name_from_csv is not None:
+            menu_name = normalize_menu_name(menu_name_from_csv)
+            if menu_name != menu1:
+                raise ValueError(
+                    f"[row {idx}] CSV menu mismatch: csv={menu_name}, image1={menu1}, image2={menu2}"
+                )
+        else:
+            menu_name = infer_menu_from_path(img1_path)
 
         cnn1 = extract_cnn_feature_cached(img1_path, feature_extractor, cnn_cache)
         cnn2 = extract_cnn_feature_cached(img2_path, feature_extractor, cnn_cache)
@@ -415,7 +465,7 @@ def main():
 
         print(
             f"[{idx+1}/{len(df)}] {img1_name} vs {img2_name} "
-            f"-> p12={p12:.4f}, p21={p21:.4f}, score1={score_img1:.4f}, Winner={winner}"
+            f"-> menu={menu_name}, p12={p12:.4f}, p21={p21:.4f}, score1={score_img1:.4f}, Winner={winner}"
         )
 
     df["Winner"] = winners

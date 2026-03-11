@@ -19,7 +19,9 @@ from xgboost import XGBClassifier
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "Data"
 MODELS_DIR = BASE_DIR / "models"
-CSV_PATH = DATA_DIR / "data_from_questionaire.csv"
+
+QUESTIONNAIRE_CSV_PATH = DATA_DIR / "data_from_questionaire.csv"
+INSTAGRAM_CSV_PATH = DATA_DIR / "data_from_intragram.csv"
 
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -35,14 +37,32 @@ IMG_SIZE = (224, 224)
 RANDOM_STATE = 42
 N_SPLITS = 5
 
+VALID_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+VALID_MENUS = {"sushi", "ramen", "pizza", "burger", "dessert"}
+
 MENU_TO_FOLDER = {
     "sushi": "sushi",
     "ramen": "ramen",
     "pizza": "pizza",
-    "burger": "hamburger",
-    "hamburger": "hamburger",
+    "burger": "burger",
+    "hamburger": "burger",
     "dessert": "dessert",
 }
+
+# ---- Conservative pseudo-label settings ----
+ANCHORS_PER_MENU = 16
+MAX_PSEUDO_PAIRS_PER_MENU = 500
+PSEUDO_MIN_SCORE_GAP = 0.20
+PSEUDO_BASE_WEIGHT = 0.18
+MAX_RANDOM_PAIR_TRIALS_FACTOR = 18
+
+TRUE_PAIR_WEIGHT_MULTIPLIER = {
+    "questionnaire": 1.25,
+    "instagram": 0.85,
+}
+
+# optional: only use pseudo from menus that have enough images
+MIN_IMAGES_PER_MENU_FOR_PSEUDO = 50
 
 
 # =========================
@@ -53,28 +73,181 @@ def normalize_menu_name(menu_name: str) -> str:
     return MENU_TO_FOLDER.get(menu, menu)
 
 
+def get_menu_from_path(image_path: str) -> str:
+    p = Path(image_path)
+    folder = p.parent.name.strip().lower()
+    return normalize_menu_name(folder)
+
+
 def build_image_index(root_dir: Path) -> dict:
     image_index = {}
-    valid_ext = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-
     for p in root_dir.rglob("*"):
-        if p.is_file() and p.suffix.lower() in valid_ext:
-            image_index[p.name] = str(p)
-
+        if p.is_file() and p.suffix.lower() in VALID_EXT:
+            key = p.name.lower()
+            image_index.setdefault(key, []).append(str(p))
     return image_index
 
 
-def resolve_image_path(image_name: str, menu_name: str, image_index: dict) -> str:
-    menu_folder = normalize_menu_name(menu_name)
-    candidate = DATA_DIR / menu_folder / image_name
+def build_menu_to_images(root_dir: Path) -> dict:
+    menu_to_images = {menu: [] for menu in VALID_MENUS}
 
+    for p in root_dir.rglob("*"):
+        if p.is_file() and p.suffix.lower() in VALID_EXT:
+            menu = get_menu_from_path(str(p))
+            if menu in VALID_MENUS:
+                menu_to_images[menu].append(str(p))
+
+    for menu in menu_to_images:
+        menu_to_images[menu] = sorted(list(set(menu_to_images[menu])))
+
+    return menu_to_images
+
+
+def resolve_image_path(image_name: str, menu_name: str, image_index: dict) -> str:
+    image_name = str(image_name).strip()
+    image_key = image_name.lower()
+    expected_menu = normalize_menu_name(menu_name)
+
+    if expected_menu not in VALID_MENUS:
+        raise ValueError(f"Unknown menu '{menu_name}' -> normalized '{expected_menu}'")
+
+    candidate = DATA_DIR / expected_menu / image_name
     if candidate.exists():
+        actual_menu = get_menu_from_path(str(candidate))
+        if actual_menu != expected_menu:
+            raise ValueError(
+                f"Category mismatch: file={image_name}, expected={expected_menu}, actual={actual_menu}"
+            )
         return str(candidate)
 
-    if image_name in image_index:
-        return image_index[image_name]
+    if image_key not in image_index:
+        raise FileNotFoundError(f"Cannot find image: {image_name} (menu={menu_name})")
 
-    raise FileNotFoundError(f"Cannot find image: {image_name} (menu={menu_name})")
+    matches = image_index[image_key]
+    same_menu_matches = [p for p in matches if get_menu_from_path(p) == expected_menu]
+
+    if len(same_menu_matches) == 1:
+        return same_menu_matches[0]
+
+    if len(same_menu_matches) > 1:
+        raise ValueError(
+            f"Ambiguous image name '{image_name}' in menu '{expected_menu}'. Matches: {same_menu_matches}"
+        )
+
+    found_menus = sorted({get_menu_from_path(p) for p in matches})
+    raise ValueError(
+        f"Image '{image_name}' found, but not in expected menu '{expected_menu}'. Found in: {found_menus}"
+    )
+
+
+def validate_pair_category(image1_path: str, image2_path: str, csv_menu: str, row_idx=None):
+    menu_csv = normalize_menu_name(csv_menu)
+    menu1 = get_menu_from_path(image1_path)
+    menu2 = get_menu_from_path(image2_path)
+
+    prefix = f"[row {row_idx}] " if row_idx is not None else ""
+
+    if menu1 != menu2:
+        raise ValueError(
+            f"{prefix}Pair category mismatch: "
+            f"image1={Path(image1_path).name} -> {menu1}, "
+            f"image2={Path(image2_path).name} -> {menu2}"
+        )
+
+    if menu1 != menu_csv:
+        raise ValueError(
+            f"{prefix}CSV menu mismatch: "
+            f"csv_menu={menu_csv}, image1_menu={menu1}, image2_menu={menu2}"
+        )
+
+
+def load_pair_csv(csv_path: Path, source_name: str) -> pd.DataFrame:
+    if not csv_path.exists():
+        print(f"[WARN] CSV not found, skipping: {csv_path}")
+        return pd.DataFrame()
+
+    df = pd.read_csv(csv_path)
+
+    required_cols = ["Image 1", "Image 2", "Menu", "Winner"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        print(f"[WARN] CSV missing columns {missing}, skipping: {csv_path}")
+        return pd.DataFrame()
+
+    df = df.copy()
+    df["Source"] = source_name
+    df = df[df["Winner"].isin([1, 2])].reset_index(drop=True)
+
+    print(f"[INFO] Loaded {len(df)} rows from {csv_path.name} (source={source_name})")
+    return df
+
+
+def compute_vote_margin_weight(row: pd.Series) -> float:
+    if "Num Vote 1" in row and "Num Vote 2" in row:
+        try:
+            v1 = float(row["Num Vote 1"])
+            v2 = float(row["Num Vote 2"])
+            total = max(v1 + v2, 1.0)
+            margin = abs(v1 - v2) / total
+
+            if margin < 0.03:
+                return 0.25
+            elif margin < 0.07:
+                return 0.55
+            elif margin < 0.15:
+                return 1.00
+            elif margin < 0.25:
+                return 1.35
+            else:
+                return 1.70
+        except Exception:
+            return 1.0
+
+    return 1.0
+
+
+def build_true_pair_records(df_all: pd.DataFrame, image_index: dict) -> list:
+    records = []
+    bad_rows = []
+
+    for i, row in df_all.iterrows():
+        try:
+            p1 = resolve_image_path(row["Image 1"], row["Menu"], image_index)
+            p2 = resolve_image_path(row["Image 2"], row["Menu"], image_index)
+
+            validate_pair_category(p1, p2, row["Menu"], row_idx=i)
+
+            source_name = str(row.get("Source", "unknown")).strip().lower()
+            base_weight = TRUE_PAIR_WEIGHT_MULTIPLIER.get(source_name, 1.0)
+            vote_weight = compute_vote_margin_weight(row)
+
+            records.append({
+                "image1_path": p1,
+                "image2_path": p2,
+                "menu": normalize_menu_name(row["Menu"]),
+                "winner": int(row["Winner"]),
+                "weight": float(base_weight * vote_weight),
+                "source": source_name,
+                "is_pseudo": False,
+            })
+        except Exception as e:
+            bad_rows.append((i, str(e)))
+
+    if bad_rows:
+        print("\n[ERROR] Found invalid labeled pairs:")
+        for row_id, err in bad_rows[:20]:
+            print(f"  row={row_id}: {err}")
+        raise ValueError(f"Found {len(bad_rows)} invalid rows. Fix CSV / file placement first.")
+
+    return records
+
+
+def collect_paths_from_records(records: list) -> set:
+    s = set()
+    for r in records:
+        s.add(r["image1_path"])
+        s.add(r["image2_path"])
+    return s
 
 
 # =========================
@@ -116,7 +289,7 @@ def extract_cnn_features_for_unique_images(feature_extractor: tf.keras.Model, im
         for p, f in zip(paths, feats):
             cache[p] = f.astype(np.float32)
 
-    for p in unique_paths:
+    for idx, p in enumerate(unique_paths, start=1):
         img = load_img_for_cnn(p)
         batch_imgs.append(img)
         batch_paths.append(p)
@@ -125,6 +298,9 @@ def extract_cnn_features_for_unique_images(feature_extractor: tf.keras.Model, im
             flush_batch(batch_imgs, batch_paths)
             batch_imgs = []
             batch_paths = []
+
+        if idx % 500 == 0:
+            print(f"[INFO]   CNN progress: {idx}/{len(unique_paths)}")
 
     flush_batch(batch_imgs, batch_paths)
     return cache
@@ -181,7 +357,7 @@ def laplacian_variance(gray: np.ndarray) -> float:
 
 
 # =========================
-# BASIC HANDCRAFTED FEATURES
+# HANDCRAFTED FEATURES
 # =========================
 def compute_handcrafted_features(image_path: str) -> np.ndarray:
     img = Image.open(image_path).convert("RGB").resize(IMG_SIZE)
@@ -234,9 +410,6 @@ def compute_handcrafted_features(image_path: str) -> np.ndarray:
     ], dtype=np.float32)
 
 
-# =========================
-# ADVANCED FOOD FEATURES
-# =========================
 def compute_advanced_food_features(image_path: str) -> np.ndarray:
     img = Image.open(image_path).convert("RGB").resize(IMG_SIZE)
     rgb = np.asarray(img).astype(np.float32) / 255.0
@@ -281,9 +454,9 @@ def compute_advanced_food_features(image_path: str) -> np.ndarray:
     empty_space_ratio = float(np.mean(empty_mask))
 
     warm_mask = (
-        (hue < 0.12) |
-        ((hue > 0.90) & (hue <= 1.0)) |
-        ((hue > 0.12) & (hue < 0.18))
+        (hue < 0.12)
+        | ((hue > 0.90) & (hue <= 1.0))
+        | ((hue > 0.12) & (hue < 0.18))
     )
     warm_ratio = float(np.mean(warm_mask))
 
@@ -350,10 +523,13 @@ def extract_handcrafted_features_for_unique_images(image_paths: list) -> dict:
 
     print(f"[INFO] Extracting handcrafted features for {len(unique_paths)} unique images...")
 
-    for p in unique_paths:
+    for idx, p in enumerate(unique_paths, start=1):
         basic = compute_handcrafted_features(p)
         advanced = compute_advanced_food_features(p)
         cache[p] = np.concatenate([basic, advanced], axis=0).astype(np.float32)
+
+        if idx % 500 == 0:
+            print(f"[INFO]   HC progress: {idx}/{len(unique_paths)}")
 
     return cache
 
@@ -362,7 +538,7 @@ def extract_handcrafted_features_for_unique_images(image_paths: list) -> dict:
 # PAIR FEATURE
 # =========================
 def get_category_one_hot(menu_name: str) -> np.ndarray:
-    categories = ["sushi", "ramen", "pizza", "hamburger", "dessert"]
+    categories = ["sushi", "ramen", "pizza", "burger", "dessert"]
     menu_norm = normalize_menu_name(menu_name)
 
     one_hot = np.zeros(len(categories), dtype=np.float32)
@@ -379,64 +555,51 @@ def build_pair_feature(
     hc2: np.ndarray,
     menu_name: str
 ) -> np.ndarray:
-    cnn_abs_diff = np.abs(cnn1 - cnn2)
+    cnn_diff = cnn1 - cnn2
+    cnn_abs_diff = np.abs(cnn_diff)
+
     hc_diff = hc1 - hc2
     hc_abs_diff = np.abs(hc_diff)
+
+    # extra interaction features เล็กน้อย
+    hc_mean = (hc1 + hc2) * 0.5
+
     one_hot = get_category_one_hot(menu_name)
 
     feat = np.concatenate([
         cnn_abs_diff,
+        cnn_diff[:64],   # เก็บ directional signal บางส่วน ไม่ต้องยาวเกิน
         hc_diff,
         hc_abs_diff,
-        one_hot
+        hc_mean,
+        one_hot,
     ], axis=0)
 
     return feat.astype(np.float32)
 
 
-def compute_sample_weight(row: pd.Series) -> float:
-    if "Num Vote 1" in row and "Num Vote 2" in row:
-        v1 = float(row["Num Vote 1"])
-        v2 = float(row["Num Vote 2"])
-        total = max(v1 + v2, 1.0)
-        margin = abs(v1 - v2) / total
-
-        if margin < 0.03:
-            return 0.20
-        elif margin < 0.07:
-            return 0.50
-        elif margin < 0.15:
-            return 1.00
-        elif margin < 0.25:
-            return 1.50
-        else:
-            return 2.20
-
-    return 1.0
-
-
-def make_dataset_from_df(df_part, img1_paths, img2_paths, cnn_cache, hc_cache):
+def records_to_dataset(records, cnn_cache, hc_cache):
     X = []
     y = []
     sample_weights = []
 
-    for i, row in df_part.iterrows():
-        p1 = img1_paths[i]
-        p2 = img2_paths[i]
+    for rec in records:
+        p1 = rec["image1_path"]
+        p2 = rec["image2_path"]
+        menu = rec["menu"]
+        winner = int(rec["winner"])
+        w = float(rec["weight"])
 
         cnn1 = cnn_cache[p1]
         cnn2 = cnn_cache[p2]
         hc1 = hc_cache[p1]
         hc2 = hc_cache[p2]
 
-        w = compute_sample_weight(row)
-        winner = int(row["Winner"])
-
-        X.append(build_pair_feature(cnn1, cnn2, hc1, hc2, row["Menu"]))
+        X.append(build_pair_feature(cnn1, cnn2, hc1, hc2, menu))
         y.append(1 if winner == 1 else 0)
         sample_weights.append(w)
 
-        X.append(build_pair_feature(cnn2, cnn1, hc2, hc1, row["Menu"]))
+        X.append(build_pair_feature(cnn2, cnn1, hc2, hc1, menu))
         y.append(0 if winner == 1 else 1)
         sample_weights.append(w)
 
@@ -449,21 +612,22 @@ def make_dataset_from_df(df_part, img1_paths, img2_paths, cnn_cache, hc_cache):
 # =========================
 # MODEL
 # =========================
-def build_final_model() -> Pipeline:
+def build_model() -> Pipeline:
     return Pipeline([
         ("scaler", StandardScaler()),
         ("clf", XGBClassifier(
-            n_estimators=450,
+            n_estimators=320,
             max_depth=4,
-            learning_rate=0.022,
+            learning_rate=0.03,
             subsample=0.82,
-            colsample_bytree=0.70,
-            reg_lambda=3.5,
-            min_child_weight=3,
-            gamma=0.20,
+            colsample_bytree=0.72,
+            reg_lambda=4.0,
+            reg_alpha=0.2,
+            min_child_weight=4,
+            gamma=0.25,
             objective="binary:logistic",
             eval_metric="logloss",
-            random_state=52,
+            random_state=RANDOM_STATE,
             n_jobs=-1,
         ))
     ])
@@ -476,114 +640,403 @@ def fit_model_with_sample_weight(model, X, y, sample_weight):
     return model
 
 
-def cross_validate_single_model(df, img1_paths, img2_paths, cnn_cache, hc_cache):
+# =========================
+# TRUE-ONLY CV
+# =========================
+def cross_validate_true_only(records, cnn_cache, hc_cache):
+    if not records:
+        raise ValueError("No true labeled records for cross-validation.")
+
+    y_base = np.array([1 if int(r["winner"]) == 1 else 0 for r in records], dtype=np.int32)
+    idxs = np.arange(len(records))
+
     skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
     fold_scores = []
 
-    print("[INFO] Cross-validating single fixed config...")
+    print("[INFO] Cross-validating on TRUE pairs only...")
 
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(df, df["Winner"]), start=1):
-        df_train = df.iloc[train_idx]
-        df_val = df.iloc[val_idx]
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(idxs, y_base), start=1):
+        train_records = [records[i] for i in train_idx]
+        val_records = [records[i] for i in val_idx]
 
-        X_train, y_train, w_train = make_dataset_from_df(
-            df_train, img1_paths, img2_paths, cnn_cache, hc_cache
-        )
-        X_val, y_val, _ = make_dataset_from_df(
-            df_val, img1_paths, img2_paths, cnn_cache, hc_cache
-        )
+        X_train, y_train, w_train = records_to_dataset(train_records, cnn_cache, hc_cache)
+        X_val, y_val, _ = records_to_dataset(val_records, cnn_cache, hc_cache)
 
-        model = build_final_model()
+        model = build_model()
         fit_model_with_sample_weight(model, X_train, y_train, w_train)
 
         val_pred = model.predict(X_val)
         acc = accuracy_score(y_val, val_pred)
         fold_scores.append(acc)
 
-        print(f"[INFO]   Fold {fold_idx}/{N_SPLITS} accuracy = {acc:.4f}")
-
-    mean_acc = float(np.mean(fold_scores))
-    std_acc = float(np.std(fold_scores))
+        print(f"[INFO]   Fold {fold_idx}/{N_SPLITS} TRUE-only acc = {acc:.4f}")
 
     return {
         "scores": fold_scores,
-        "mean_accuracy": mean_acc,
-        "std_accuracy": std_acc,
+        "mean_accuracy": float(np.mean(fold_scores)),
+        "std_accuracy": float(np.std(fold_scores)),
     }
+
+
+# =========================
+# PSEUDO-LABELING
+# =========================
+def choose_anchor_paths(image_paths, rng, num_anchors):
+    image_paths = list(image_paths)
+    if len(image_paths) <= num_anchors:
+        return image_paths
+    idxs = rng.choice(len(image_paths), size=num_anchors, replace=False)
+    return [image_paths[i] for i in idxs]
+
+
+def score_all_images_with_seed_model(menu_name, image_paths, seed_model, cnn_cache, hc_cache, rng):
+    if len(image_paths) == 0:
+        return {}
+
+    anchors = choose_anchor_paths(image_paths, rng, ANCHORS_PER_MENU)
+    scores = {}
+
+    print(f"[INFO] Scoring images for menu='{menu_name}' using {len(anchors)} anchors...")
+
+    for idx, img_path in enumerate(image_paths, start=1):
+        feats = []
+
+        for anchor_path in anchors:
+            if anchor_path == img_path:
+                continue
+
+            cnn1 = cnn_cache[img_path]
+            cnn2 = cnn_cache[anchor_path]
+            hc1 = hc_cache[img_path]
+            hc2 = hc_cache[anchor_path]
+
+            feats.append(build_pair_feature(cnn1, cnn2, hc1, hc2, menu_name))
+
+        if len(feats) == 0:
+            scores[img_path] = 0.5
+        else:
+            X = np.asarray(feats, dtype=np.float32)
+            probs = seed_model.predict_proba(X)[:, 1]
+            scores[img_path] = float(np.mean(probs))
+
+        if idx % 500 == 0:
+            print(f"[INFO]   scoring progress {menu_name}: {idx}/{len(image_paths)}")
+
+    return scores
+
+
+def pseudo_weight_from_gap(gap: float) -> float:
+    # gap ยิ่งสูง weight ยิ่งมาก แต่ยังคุมไม่ให้หนักเกิน
+    if gap >= 0.40:
+        return PSEUDO_BASE_WEIGHT * 1.60
+    elif gap >= 0.32:
+        return PSEUDO_BASE_WEIGHT * 1.35
+    elif gap >= 0.26:
+        return PSEUDO_BASE_WEIGHT * 1.15
+    return PSEUDO_BASE_WEIGHT
+
+
+def generate_pseudo_pairs_for_menu(menu_name, image_paths, image_scores, rng):
+    pseudo_records = []
+
+    if len(image_paths) < 2:
+        return pseudo_records
+
+    if len(image_paths) < MIN_IMAGES_PER_MENU_FOR_PSEUDO:
+        print(f"[INFO] Skip pseudo for menu='{menu_name}' because images too few ({len(image_paths)})")
+        return pseudo_records
+
+    n_target = min(MAX_PSEUDO_PAIRS_PER_MENU, max(120, len(image_paths) // 10))
+    max_trials = n_target * MAX_RANDOM_PAIR_TRIALS_FACTOR
+
+    seen = set()
+    trials = 0
+
+    while len(pseudo_records) < n_target and trials < max_trials:
+        i1, i2 = rng.choice(len(image_paths), size=2, replace=False)
+        p1 = image_paths[i1]
+        p2 = image_paths[i2]
+        trials += 1
+
+        key = tuple(sorted((p1, p2)))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        s1 = image_scores[p1]
+        s2 = image_scores[p2]
+        gap = abs(s1 - s2)
+
+        if gap < PSEUDO_MIN_SCORE_GAP:
+            continue
+
+        winner = 1 if s1 >= s2 else 2
+        pseudo_w = pseudo_weight_from_gap(gap)
+
+        pseudo_records.append({
+            "image1_path": p1,
+            "image2_path": p2,
+            "menu": menu_name,
+            "winner": winner,
+            "weight": float(pseudo_w),
+            "source": "pseudo",
+            "is_pseudo": True,
+            "score_gap": float(gap),
+        })
+
+    print(
+        f"[INFO] Generated {len(pseudo_records)} pseudo pairs for menu='{menu_name}' "
+        f"(trials={trials}, target={n_target})"
+    )
+    return pseudo_records
+
+
+def build_fold_safe_menu_to_images(menu_to_images: dict, forbidden_paths: set) -> dict:
+    out = {}
+    for menu, paths in menu_to_images.items():
+        out[menu] = [p for p in paths if p not in forbidden_paths]
+    return out
+
+
+def generate_pseudo_records_from_seed_model(seed_model, menu_to_images_safe, cnn_cache, hc_cache, rng):
+    pseudo_records = []
+
+    for menu in sorted(menu_to_images_safe.keys()):
+        image_paths = menu_to_images_safe[menu]
+        if len(image_paths) < 2:
+            continue
+
+        image_scores = score_all_images_with_seed_model(
+            menu_name=menu,
+            image_paths=image_paths,
+            seed_model=seed_model,
+            cnn_cache=cnn_cache,
+            hc_cache=hc_cache,
+            rng=rng,
+        )
+
+        menu_pseudo = generate_pseudo_pairs_for_menu(
+            menu_name=menu,
+            image_paths=image_paths,
+            image_scores=image_scores,
+            rng=rng,
+        )
+        pseudo_records.extend(menu_pseudo)
+
+    return pseudo_records
+
+
+# =========================
+# PSEUDO-ASSISTED CV
+# =========================
+def cross_validate_with_pseudo(true_records, menu_to_images, cnn_cache, hc_cache):
+    if not true_records:
+        raise ValueError("No true labeled records for pseudo-assisted CV.")
+
+    y_base = np.array([1 if int(r["winner"]) == 1 else 0 for r in true_records], dtype=np.int32)
+    idxs = np.arange(len(true_records))
+
+    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+    fold_scores = []
+    pseudo_counts = []
+
+    print("[INFO] Cross-validating with fold-safe pseudo-labeling...")
+
+    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(idxs, y_base), start=1):
+        rng = np.random.default_rng(RANDOM_STATE + fold_idx)
+
+        train_records = [true_records[i] for i in train_idx]
+        val_records = [true_records[i] for i in val_idx]
+
+        # train seed only on train true
+        X_seed, y_seed, w_seed = records_to_dataset(train_records, cnn_cache, hc_cache)
+        seed_model = build_model()
+        fit_model_with_sample_weight(seed_model, X_seed, y_seed, w_seed)
+
+        # IMPORTANT: forbid validation images from pseudo generation
+        val_paths = collect_paths_from_records(val_records)
+        safe_menu_to_images = build_fold_safe_menu_to_images(menu_to_images, val_paths)
+
+        pseudo_records = generate_pseudo_records_from_seed_model(
+            seed_model=seed_model,
+            menu_to_images_safe=safe_menu_to_images,
+            cnn_cache=cnn_cache,
+            hc_cache=hc_cache,
+            rng=rng,
+        )
+
+        train_plus_pseudo = train_records + pseudo_records
+
+        X_train, y_train, w_train = records_to_dataset(train_plus_pseudo, cnn_cache, hc_cache)
+        X_val, y_val, _ = records_to_dataset(val_records, cnn_cache, hc_cache)
+
+        final_model = build_model()
+        fit_model_with_sample_weight(final_model, X_train, y_train, w_train)
+
+        val_pred = final_model.predict(X_val)
+        acc = accuracy_score(y_val, val_pred)
+        fold_scores.append(acc)
+        pseudo_counts.append(len(pseudo_records))
+
+        print(
+            f"[INFO]   Fold {fold_idx}/{N_SPLITS} pseudo-assisted acc = {acc:.4f} "
+            f"(pseudo_pairs={len(pseudo_records)})"
+        )
+
+    return {
+        "scores": fold_scores,
+        "mean_accuracy": float(np.mean(fold_scores)),
+        "std_accuracy": float(np.std(fold_scores)),
+        "pseudo_pair_counts": pseudo_counts,
+        "pseudo_pair_count_mean": float(np.mean(pseudo_counts)),
+    }
+
+
+# =========================
+# FINAL TRAIN
+# =========================
+def train_final_model_with_conservative_pseudo(true_records, menu_to_images, cnn_cache, hc_cache):
+    rng = np.random.default_rng(RANDOM_STATE)
+
+    print("[INFO] Training seed model on ALL true pairs...")
+    X_seed, y_seed, w_seed = records_to_dataset(true_records, cnn_cache, hc_cache)
+    seed_model = build_model()
+    fit_model_with_sample_weight(seed_model, X_seed, y_seed, w_seed)
+
+    print("[INFO] Generating conservative pseudo pairs from ALL images...")
+    true_paths = collect_paths_from_records(true_records)
+
+    # อนุญาตให้ใช้รูปทั้งหมดได้ แต่ตัดรูป true-labeled ออก เพื่อกันการ reinforce ภาพเดิมมากเกินไป
+    menu_to_images_for_pseudo = {
+        menu: [p for p in paths if p not in true_paths]
+        for menu, paths in menu_to_images.items()
+    }
+
+    pseudo_records = generate_pseudo_records_from_seed_model(
+        seed_model=seed_model,
+        menu_to_images_safe=menu_to_images_for_pseudo,
+        cnn_cache=cnn_cache,
+        hc_cache=hc_cache,
+        rng=rng,
+    )
+
+    print(f"[INFO] Total pseudo pairs for FINAL training: {len(pseudo_records)}")
+
+    final_records = true_records + pseudo_records
+    X_full, y_full, w_full = records_to_dataset(final_records, cnn_cache, hc_cache)
+
+    print(f"[INFO] X_full shape: {X_full.shape}")
+    print(f"[INFO] y_full shape: {y_full.shape}")
+
+    final_model = build_model()
+    fit_model_with_sample_weight(final_model, X_full, y_full, w_full)
+
+    return final_model, pseudo_records
 
 
 # =========================
 # MAIN
 # =========================
 def main():
-    print("[INFO] Loading training CSV...")
-    df = pd.read_csv(CSV_PATH)
+    print("[INFO] Loading labeled pair CSVs...")
+    df_questionnaire = load_pair_csv(QUESTIONNAIRE_CSV_PATH, "questionnaire")
+    df_instagram = load_pair_csv(INSTAGRAM_CSV_PATH, "instagram")
 
-    required_cols = ["Image 1", "Image 2", "Menu", "Winner"]
-    for col in required_cols:
-        if col not in df.columns:
-            raise ValueError(f"Missing required column: {col}")
+    df_all = pd.concat([df_questionnaire, df_instagram], ignore_index=True)
+    if len(df_all) == 0:
+        raise ValueError("No valid labeled pair rows found in questionnaire/instagram CSVs.")
 
-    print(f"[INFO] Total original pairs: {len(df)}")
+    print(f"[INFO] Total labeled pairs: {len(df_all)}")
 
     print("[INFO] Building image index...")
     image_index = build_image_index(DATA_DIR)
 
-    img1_paths = {}
-    img2_paths = {}
+    print("[INFO] Validating labeled pairs...")
+    true_records = build_true_pair_records(df_all, image_index)
+    print(f"[INFO] Valid labeled pairs after checking: {len(true_records)}")
 
-    for i, row in df.iterrows():
-        img1_paths[i] = resolve_image_path(row["Image 1"], row["Menu"], image_index)
-        img2_paths[i] = resolve_image_path(row["Image 2"], row["Menu"], image_index)
+    print("[INFO] Scanning ALL images in Data/ ...")
+    menu_to_images = build_menu_to_images(DATA_DIR)
+    for menu in sorted(menu_to_images.keys()):
+        print(f"[INFO]   menu={menu:<8} images={len(menu_to_images[menu])}")
+
+    all_image_paths = []
+    for menu in sorted(menu_to_images.keys()):
+        all_image_paths.extend(menu_to_images[menu])
+    all_image_paths = sorted(list(set(all_image_paths)))
+
+    print(f"[INFO] Total ALL images used for feature extraction: {len(all_image_paths)}")
 
     print("[INFO] Creating feature extractor...")
     feature_extractor = create_feature_extractor()
     feature_extractor.save(FEATURE_EXTRACTOR_PATH)
 
-    all_paths = list(img1_paths.values()) + list(img2_paths.values())
+    cnn_cache = extract_cnn_features_for_unique_images(feature_extractor, all_image_paths)
+    hc_cache = extract_handcrafted_features_for_unique_images(all_image_paths)
 
-    cnn_cache = extract_cnn_features_for_unique_images(feature_extractor, all_paths)
-    hc_cache = extract_handcrafted_features_for_unique_images(all_paths)
+    # -------------------------
+    # 1) TRUE-only CV
+    # -------------------------
+    baseline_cv = cross_validate_true_only(true_records, cnn_cache, hc_cache)
 
-    print("[INFO] Building full pairwise dataset...")
-    X_full, y_full, w_full = make_dataset_from_df(df, img1_paths, img2_paths, cnn_cache, hc_cache)
-
-    print(f"[INFO] X_full shape: {X_full.shape}")
-    print(f"[INFO] y_full shape: {y_full.shape}")
-
-    print("[INFO] Running cross-validation on original dataframe before augmentation...")
-    cv_result = cross_validate_single_model(df, img1_paths, img2_paths, cnn_cache, hc_cache)
-
-    print("\n[RESULT] Cross-validation summary")
+    print("\n[RESULT] TRUE-only cross-validation summary")
     print(
-        f'  - fixed_xgb: mean={cv_result["mean_accuracy"]:.4f}, '
-        f'std={cv_result["std_accuracy"]:.4f}, '
-        f'scores={[round(s, 4) for s in cv_result["scores"]]}'
+        f'  - mean={baseline_cv["mean_accuracy"]:.4f}, '
+        f'std={baseline_cv["std_accuracy"]:.4f}, '
+        f'scores={[round(s, 4) for s in baseline_cv["scores"]]}'
     )
 
-    print(f'\n[RESULT] Fixed Config CV Accuracy = {cv_result["mean_accuracy"]:.4f} ± {cv_result["std_accuracy"]:.4f}')
+    # -------------------------
+    # 2) Fold-safe pseudo CV
+    # -------------------------
+    pseudo_cv = cross_validate_with_pseudo(true_records, menu_to_images, cnn_cache, hc_cache)
 
-    final_model = build_final_model()
+    print("\n[RESULT] PSEUDO-assisted cross-validation summary")
+    print(
+        f'  - mean={pseudo_cv["mean_accuracy"]:.4f}, '
+        f'std={pseudo_cv["std_accuracy"]:.4f}, '
+        f'scores={[round(s, 4) for s in pseudo_cv["scores"]]}'
+    )
+    print(
+        f'  - pseudo pair counts per fold={pseudo_cv["pseudo_pair_counts"]}, '
+        f'mean={pseudo_cv["pseudo_pair_count_mean"]:.1f}'
+    )
 
-    print("[INFO] Training final model on full dataset...")
-    fit_model_with_sample_weight(final_model, X_full, y_full, w_full)
+    # -------------------------
+    # 3) FINAL TRAIN
+    # -------------------------
+    print("\n[INFO] Training FINAL model with conservative pseudo-labeling...")
+    final_model, final_pseudo_records = train_final_model_with_conservative_pseudo(
+        true_records=true_records,
+        menu_to_images=menu_to_images,
+        cnn_cache=cnn_cache,
+        hc_cache=hc_cache,
+    )
 
-    print("[INFO] Evaluating final model on full dataset (sanity check only)...")
-    full_pred = final_model.predict(X_full)
-    full_acc = accuracy_score(y_full, full_pred)
+    # sanity check only
+    print("[INFO] Evaluating FINAL model on TRUE labeled pairs (sanity check only)...")
+    X_true_eval, y_true_eval, _ = records_to_dataset(true_records, cnn_cache, hc_cache)
+    true_eval_pred = final_model.predict(X_true_eval)
+    true_eval_acc = accuracy_score(y_true_eval, true_eval_pred)
 
-    print(f"\n[RESULT] Full-data Accuracy (sanity check) = {full_acc:.4f}\n")
-    print(classification_report(y_full, full_pred, digits=4))
+    print(f"\n[RESULT] FINAL model sanity-check accuracy on TRUE labeled pairs = {true_eval_acc:.4f}\n")
+    print(classification_report(y_true_eval, true_eval_pred, digits=4))
 
     print("[INFO] Saving classifier...")
     joblib.dump(final_model, CLASSIFIER_PATH)
 
     metadata = {
         "img_size": IMG_SIZE,
-        "csv_path": str(CSV_PATH),
+        "questionnaire_csv_path": str(QUESTIONNAIRE_CSV_PATH),
+        "instagram_csv_path": str(INSTAGRAM_CSV_PATH),
         "feature_extractor_path": str(FEATURE_EXTRACTOR_PATH),
         "classifier_path": str(CLASSIFIER_PATH),
         "menu_to_folder": MENU_TO_FOLDER,
+        "valid_menus": sorted(list(VALID_MENUS)),
+        "all_images_used_count": len(all_image_paths),
+        "image_count_per_menu": {k: len(v) for k, v in menu_to_images.items()},
+        "true_pair_count": len(true_records),
+        "final_pseudo_pair_count": len(final_pseudo_records),
         "basic_handcrafted_features": [
             "brightness_mean",
             "brightness_std",
@@ -612,31 +1065,50 @@ def main():
             "thirds_emphasis",
             "color_separation"
         ],
-        "pair_feature_mode": "cnn_abs_diff + hc_diff + hc_abs_diff + one_hot_category",
+        "pair_feature_mode": "cnn_abs_diff + cnn_diff_head64 + hc_diff + hc_abs_diff + hc_mean + one_hot_category",
         "label_definition": {
             "1": "Image 1 wins",
             "0": "Image 2 wins"
         },
-        "symmetry_augmentation": True,
-        "cross_validation": {
+        "true_only_cross_validation": {
             "n_splits": N_SPLITS,
-            "scores": cv_result["scores"],
-            "mean_accuracy": cv_result["mean_accuracy"],
-            "std_accuracy": cv_result["std_accuracy"],
+            "scores": baseline_cv["scores"],
+            "mean_accuracy": baseline_cv["mean_accuracy"],
+            "std_accuracy": baseline_cv["std_accuracy"],
         },
-        "best_xgboost_config": {
-            "n_estimators": 450,
+        "pseudo_assisted_cross_validation": {
+            "n_splits": N_SPLITS,
+            "scores": pseudo_cv["scores"],
+            "mean_accuracy": pseudo_cv["mean_accuracy"],
+            "std_accuracy": pseudo_cv["std_accuracy"],
+            "pseudo_pair_counts": pseudo_cv["pseudo_pair_counts"],
+            "pseudo_pair_count_mean": pseudo_cv["pseudo_pair_count_mean"],
+        },
+        "pseudo_labeling": {
+            "enabled": True,
+            "anchors_per_menu": ANCHORS_PER_MENU,
+            "max_pseudo_pairs_per_menu": MAX_PSEUDO_PAIRS_PER_MENU,
+            "pseudo_min_score_gap": PSEUDO_MIN_SCORE_GAP,
+            "pseudo_base_weight": PSEUDO_BASE_WEIGHT,
+            "min_images_per_menu_for_pseudo": MIN_IMAGES_PER_MENU_FOR_PSEUDO,
+            "note": "validation-fold images are excluded from pseudo generation during CV",
+        },
+        "xgboost_config": {
+            "n_estimators": 320,
             "max_depth": 4,
-            "learning_rate": 0.022,
+            "learning_rate": 0.03,
             "subsample": 0.82,
-            "colsample_bytree": 0.70,
-            "reg_lambda": 3.5,
-            "min_child_weight": 3,
-            "gamma": 0.20,
-            "random_state": 52,
+            "colsample_bytree": 0.72,
+            "reg_lambda": 4.0,
+            "reg_alpha": 0.2,
+            "min_child_weight": 4,
+            "gamma": 0.25,
+            "random_state": RANDOM_STATE,
         },
         "classifier": "xgboost",
-        "predict_mode": "bidirectional_probability"
+        "predict_mode": "bidirectional_probability",
+        "strict_same_category_check": True,
+        "final_sanity_check_accuracy_on_true_pairs": float(true_eval_acc),
     }
 
     with open(METADATA_PATH, "w", encoding="utf-8") as f:
