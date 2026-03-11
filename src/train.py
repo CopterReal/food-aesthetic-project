@@ -34,7 +34,7 @@ METADATA_PATH = MODELS_DIR / "metadata.json"
 # SETTINGS
 # =========================
 IMG_SIZE = (224, 224)
-RANDOM_STATE = 42
+BASE_RANDOM_STATE = 42
 N_SPLITS = 5
 
 VALID_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -63,6 +63,73 @@ TRUE_PAIR_WEIGHT_MULTIPLIER = {
 
 # optional: only use pseudo from menus that have enough images
 MIN_IMAGES_PER_MENU_FOR_PSEUDO = 50
+
+
+# =========================
+# MULTI-EXPERIMENT SEARCH
+# =========================
+EXPERIMENTS = [
+    {
+        "name": "exp01",
+        "seed": 42,
+        "xgb_params": {
+            "n_estimators": 320,
+            "max_depth": 4,
+            "learning_rate": 0.03,
+            "subsample": 0.82,
+            "colsample_bytree": 0.72,
+            "reg_lambda": 4.0,
+            "reg_alpha": 0.2,
+            "min_child_weight": 4,
+            "gamma": 0.25,
+        },
+    },
+    {
+        "name": "exp02",
+        "seed": 77,
+        "xgb_params": {
+            "n_estimators": 420,
+            "max_depth": 4,
+            "learning_rate": 0.025,
+            "subsample": 0.85,
+            "colsample_bytree": 0.75,
+            "reg_lambda": 5.0,
+            "reg_alpha": 0.3,
+            "min_child_weight": 4,
+            "gamma": 0.20,
+        },
+    },
+    {
+        "name": "exp03",
+        "seed": 123,
+        "xgb_params": {
+            "n_estimators": 500,
+            "max_depth": 5,
+            "learning_rate": 0.02,
+            "subsample": 0.80,
+            "colsample_bytree": 0.70,
+            "reg_lambda": 6.0,
+            "reg_alpha": 0.4,
+            "min_child_weight": 5,
+            "gamma": 0.30,
+        },
+    },
+    {
+        "name": "exp04",
+        "seed": 999,
+        "xgb_params": {
+            "n_estimators": 280,
+            "max_depth": 3,
+            "learning_rate": 0.04,
+            "subsample": 0.90,
+            "colsample_bytree": 0.80,
+            "reg_lambda": 3.0,
+            "reg_alpha": 0.15,
+            "min_child_weight": 3,
+            "gamma": 0.15,
+        },
+    },
+]
 
 
 # =========================
@@ -561,14 +628,13 @@ def build_pair_feature(
     hc_diff = hc1 - hc2
     hc_abs_diff = np.abs(hc_diff)
 
-    # extra interaction features เล็กน้อย
     hc_mean = (hc1 + hc2) * 0.5
 
     one_hot = get_category_one_hot(menu_name)
 
     feat = np.concatenate([
         cnn_abs_diff,
-        cnn_diff[:64],   # เก็บ directional signal บางส่วน ไม่ต้องยาวเกิน
+        cnn_diff[:64],
         hc_diff,
         hc_abs_diff,
         hc_mean,
@@ -612,23 +678,15 @@ def records_to_dataset(records, cnn_cache, hc_cache):
 # =========================
 # MODEL
 # =========================
-def build_model() -> Pipeline:
+def build_model(random_state: int, xgb_params: dict) -> Pipeline:
     return Pipeline([
         ("scaler", StandardScaler()),
         ("clf", XGBClassifier(
-            n_estimators=320,
-            max_depth=4,
-            learning_rate=0.03,
-            subsample=0.82,
-            colsample_bytree=0.72,
-            reg_lambda=4.0,
-            reg_alpha=0.2,
-            min_child_weight=4,
-            gamma=0.25,
             objective="binary:logistic",
             eval_metric="logloss",
-            random_state=RANDOM_STATE,
+            random_state=random_state,
             n_jobs=-1,
+            **xgb_params,
         ))
     ])
 
@@ -643,14 +701,14 @@ def fit_model_with_sample_weight(model, X, y, sample_weight):
 # =========================
 # TRUE-ONLY CV
 # =========================
-def cross_validate_true_only(records, cnn_cache, hc_cache):
+def cross_validate_true_only(records, cnn_cache, hc_cache, random_state: int, xgb_params: dict):
     if not records:
         raise ValueError("No true labeled records for cross-validation.")
 
     y_base = np.array([1 if int(r["winner"]) == 1 else 0 for r in records], dtype=np.int32)
     idxs = np.arange(len(records))
 
-    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=random_state)
     fold_scores = []
 
     print("[INFO] Cross-validating on TRUE pairs only...")
@@ -662,7 +720,7 @@ def cross_validate_true_only(records, cnn_cache, hc_cache):
         X_train, y_train, w_train = records_to_dataset(train_records, cnn_cache, hc_cache)
         X_val, y_val, _ = records_to_dataset(val_records, cnn_cache, hc_cache)
 
-        model = build_model()
+        model = build_model(random_state=random_state, xgb_params=xgb_params)
         fit_model_with_sample_weight(model, X_train, y_train, w_train)
 
         val_pred = model.predict(X_val)
@@ -726,7 +784,6 @@ def score_all_images_with_seed_model(menu_name, image_paths, seed_model, cnn_cac
 
 
 def pseudo_weight_from_gap(gap: float) -> float:
-    # gap ยิ่งสูง weight ยิ่งมาก แต่ยังคุมไม่ให้หนักเกิน
     if gap >= 0.40:
         return PSEUDO_BASE_WEIGHT * 1.60
     elif gap >= 0.32:
@@ -829,31 +886,29 @@ def generate_pseudo_records_from_seed_model(seed_model, menu_to_images_safe, cnn
 # =========================
 # PSEUDO-ASSISTED CV
 # =========================
-def cross_validate_with_pseudo(true_records, menu_to_images, cnn_cache, hc_cache):
+def cross_validate_with_pseudo(true_records, menu_to_images, cnn_cache, hc_cache, random_state: int, xgb_params: dict):
     if not true_records:
         raise ValueError("No true labeled records for pseudo-assisted CV.")
 
     y_base = np.array([1 if int(r["winner"]) == 1 else 0 for r in true_records], dtype=np.int32)
     idxs = np.arange(len(true_records))
 
-    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=random_state)
     fold_scores = []
     pseudo_counts = []
 
     print("[INFO] Cross-validating with fold-safe pseudo-labeling...")
 
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(idxs, y_base), start=1):
-        rng = np.random.default_rng(RANDOM_STATE + fold_idx)
+        rng = np.random.default_rng(random_state + fold_idx)
 
         train_records = [true_records[i] for i in train_idx]
         val_records = [true_records[i] for i in val_idx]
 
-        # train seed only on train true
         X_seed, y_seed, w_seed = records_to_dataset(train_records, cnn_cache, hc_cache)
-        seed_model = build_model()
+        seed_model = build_model(random_state=random_state, xgb_params=xgb_params)
         fit_model_with_sample_weight(seed_model, X_seed, y_seed, w_seed)
 
-        # IMPORTANT: forbid validation images from pseudo generation
         val_paths = collect_paths_from_records(val_records)
         safe_menu_to_images = build_fold_safe_menu_to_images(menu_to_images, val_paths)
 
@@ -870,7 +925,7 @@ def cross_validate_with_pseudo(true_records, menu_to_images, cnn_cache, hc_cache
         X_train, y_train, w_train = records_to_dataset(train_plus_pseudo, cnn_cache, hc_cache)
         X_val, y_val, _ = records_to_dataset(val_records, cnn_cache, hc_cache)
 
-        final_model = build_model()
+        final_model = build_model(random_state=random_state, xgb_params=xgb_params)
         fit_model_with_sample_weight(final_model, X_train, y_train, w_train)
 
         val_pred = final_model.predict(X_val)
@@ -895,18 +950,17 @@ def cross_validate_with_pseudo(true_records, menu_to_images, cnn_cache, hc_cache
 # =========================
 # FINAL TRAIN
 # =========================
-def train_final_model_with_conservative_pseudo(true_records, menu_to_images, cnn_cache, hc_cache):
-    rng = np.random.default_rng(RANDOM_STATE)
+def train_final_model_with_conservative_pseudo(true_records, menu_to_images, cnn_cache, hc_cache, random_state: int, xgb_params: dict):
+    rng = np.random.default_rng(random_state)
 
     print("[INFO] Training seed model on ALL true pairs...")
     X_seed, y_seed, w_seed = records_to_dataset(true_records, cnn_cache, hc_cache)
-    seed_model = build_model()
+    seed_model = build_model(random_state=random_state, xgb_params=xgb_params)
     fit_model_with_sample_weight(seed_model, X_seed, y_seed, w_seed)
 
     print("[INFO] Generating conservative pseudo pairs from ALL images...")
     true_paths = collect_paths_from_records(true_records)
 
-    # อนุญาตให้ใช้รูปทั้งหมดได้ แต่ตัดรูป true-labeled ออก เพื่อกันการ reinforce ภาพเดิมมากเกินไป
     menu_to_images_for_pseudo = {
         menu: [p for p in paths if p not in true_paths]
         for menu, paths in menu_to_images.items()
@@ -928,10 +982,96 @@ def train_final_model_with_conservative_pseudo(true_records, menu_to_images, cnn
     print(f"[INFO] X_full shape: {X_full.shape}")
     print(f"[INFO] y_full shape: {y_full.shape}")
 
-    final_model = build_model()
+    final_model = build_model(random_state=random_state, xgb_params=xgb_params)
     fit_model_with_sample_weight(final_model, X_full, y_full, w_full)
 
     return final_model, pseudo_records
+
+
+# =========================
+# EXPERIMENT SEARCH
+# =========================
+def is_better_experiment(candidate: dict, best: dict | None) -> bool:
+    if best is None:
+        return True
+
+    cand_pseudo = candidate["pseudo_cv"]["mean_accuracy"]
+    best_pseudo = best["pseudo_cv"]["mean_accuracy"]
+
+    if cand_pseudo > best_pseudo:
+        return True
+    if cand_pseudo < best_pseudo:
+        return False
+
+    cand_true = candidate["baseline_cv"]["mean_accuracy"]
+    best_true = best["baseline_cv"]["mean_accuracy"]
+
+    if cand_true > best_true:
+        return True
+    if cand_true < best_true:
+        return False
+
+    cand_pseudo_std = candidate["pseudo_cv"]["std_accuracy"]
+    best_pseudo_std = best["pseudo_cv"]["std_accuracy"]
+
+    if cand_pseudo_std < best_pseudo_std:
+        return True
+    if cand_pseudo_std > best_pseudo_std:
+        return False
+
+    return candidate["experiment"]["name"] < best["experiment"]["name"]
+
+
+def run_experiment(experiment, true_records, menu_to_images, cnn_cache, hc_cache):
+    exp_name = experiment["name"]
+    exp_seed = int(experiment["seed"])
+    xgb_params = experiment["xgb_params"]
+
+    print("\n" + "=" * 80)
+    print(f"[INFO] START EXPERIMENT: {exp_name}")
+    print(json.dumps(experiment, indent=2, ensure_ascii=False))
+    print("=" * 80)
+
+    baseline_cv = cross_validate_true_only(
+        records=true_records,
+        cnn_cache=cnn_cache,
+        hc_cache=hc_cache,
+        random_state=exp_seed,
+        xgb_params=xgb_params,
+    )
+
+    print("\n[RESULT] TRUE-only cross-validation summary")
+    print(
+        f'  - mean={baseline_cv["mean_accuracy"]:.4f}, '
+        f'std={baseline_cv["std_accuracy"]:.4f}, '
+        f'scores={[round(s, 4) for s in baseline_cv["scores"]]}'
+    )
+
+    pseudo_cv = cross_validate_with_pseudo(
+        true_records=true_records,
+        menu_to_images=menu_to_images,
+        cnn_cache=cnn_cache,
+        hc_cache=hc_cache,
+        random_state=exp_seed,
+        xgb_params=xgb_params,
+    )
+
+    print("\n[RESULT] PSEUDO-assisted cross-validation summary")
+    print(
+        f'  - mean={pseudo_cv["mean_accuracy"]:.4f}, '
+        f'std={pseudo_cv["std_accuracy"]:.4f}, '
+        f'scores={[round(s, 4) for s in pseudo_cv["scores"]]}'
+    )
+    print(
+        f'  - pseudo pair counts per fold={pseudo_cv["pseudo_pair_counts"]}, '
+        f'mean={pseudo_cv["pseudo_pair_count_mean"]:.1f}'
+    )
+
+    return {
+        "experiment": experiment,
+        "baseline_cv": baseline_cv,
+        "pseudo_cv": pseudo_cv,
+    }
 
 
 # =========================
@@ -975,45 +1115,60 @@ def main():
     hc_cache = extract_handcrafted_features_for_unique_images(all_image_paths)
 
     # -------------------------
-    # 1) TRUE-only CV
+    # MULTI-EXPERIMENT SEARCH
     # -------------------------
-    baseline_cv = cross_validate_true_only(true_records, cnn_cache, hc_cache)
+    all_results = []
+    best_result = None
 
-    print("\n[RESULT] TRUE-only cross-validation summary")
+    for experiment in EXPERIMENTS:
+        result = run_experiment(
+            experiment=experiment,
+            true_records=true_records,
+            menu_to_images=menu_to_images,
+            cnn_cache=cnn_cache,
+            hc_cache=hc_cache,
+        )
+        all_results.append(result)
+
+        if is_better_experiment(result, best_result):
+            best_result = result
+            print(f"\n[INFO] Current BEST experiment = {best_result['experiment']['name']}")
+
+    if best_result is None:
+        raise RuntimeError("No experiment result found.")
+
+    best_experiment = best_result["experiment"]
+    best_seed = int(best_experiment["seed"])
+    best_xgb_params = best_experiment["xgb_params"]
+    baseline_cv = best_result["baseline_cv"]
+    pseudo_cv = best_result["pseudo_cv"]
+
+    print("\n" + "#" * 80)
+    print("[RESULT] BEST EXPERIMENT SELECTED")
+    print(json.dumps(best_experiment, indent=2, ensure_ascii=False))
     print(
-        f'  - mean={baseline_cv["mean_accuracy"]:.4f}, '
-        f'std={baseline_cv["std_accuracy"]:.4f}, '
-        f'scores={[round(s, 4) for s in baseline_cv["scores"]]}'
-    )
-
-    # -------------------------
-    # 2) Fold-safe pseudo CV
-    # -------------------------
-    pseudo_cv = cross_validate_with_pseudo(true_records, menu_to_images, cnn_cache, hc_cache)
-
-    print("\n[RESULT] PSEUDO-assisted cross-validation summary")
-    print(
-        f'  - mean={pseudo_cv["mean_accuracy"]:.4f}, '
-        f'std={pseudo_cv["std_accuracy"]:.4f}, '
-        f'scores={[round(s, 4) for s in pseudo_cv["scores"]]}'
+        f"[RESULT] Best TRUE-only CV mean={baseline_cv['mean_accuracy']:.4f}, "
+        f"std={baseline_cv['std_accuracy']:.4f}"
     )
     print(
-        f'  - pseudo pair counts per fold={pseudo_cv["pseudo_pair_counts"]}, '
-        f'mean={pseudo_cv["pseudo_pair_count_mean"]:.1f}'
+        f"[RESULT] Best PSEUDO-assisted CV mean={pseudo_cv['mean_accuracy']:.4f}, "
+        f"std={pseudo_cv['std_accuracy']:.4f}"
     )
+    print("#" * 80)
 
     # -------------------------
-    # 3) FINAL TRAIN
+    # FINAL TRAIN
     # -------------------------
-    print("\n[INFO] Training FINAL model with conservative pseudo-labeling...")
+    print("\n[INFO] Training FINAL model using BEST experiment...")
     final_model, final_pseudo_records = train_final_model_with_conservative_pseudo(
         true_records=true_records,
         menu_to_images=menu_to_images,
         cnn_cache=cnn_cache,
         hc_cache=hc_cache,
+        random_state=best_seed,
+        xgb_params=best_xgb_params,
     )
 
-    # sanity check only
     print("[INFO] Evaluating FINAL model on TRUE labeled pairs (sanity check only)...")
     X_true_eval, y_true_eval, _ = records_to_dataset(true_records, cnn_cache, hc_cache)
     true_eval_pred = final_model.predict(X_true_eval)
@@ -1037,6 +1192,7 @@ def main():
         "image_count_per_menu": {k: len(v) for k, v in menu_to_images.items()},
         "true_pair_count": len(true_records),
         "final_pseudo_pair_count": len(final_pseudo_records),
+
         "basic_handcrafted_features": [
             "brightness_mean",
             "brightness_std",
@@ -1070,6 +1226,17 @@ def main():
             "1": "Image 1 wins",
             "0": "Image 2 wins"
         },
+
+        "best_experiment": best_experiment,
+        "all_experiment_results": [
+            {
+                "experiment": r["experiment"],
+                "true_only_cross_validation": r["baseline_cv"],
+                "pseudo_assisted_cross_validation": r["pseudo_cv"],
+            }
+            for r in all_results
+        ],
+
         "true_only_cross_validation": {
             "n_splits": N_SPLITS,
             "scores": baseline_cv["scores"],
@@ -1084,6 +1251,7 @@ def main():
             "pseudo_pair_counts": pseudo_cv["pseudo_pair_counts"],
             "pseudo_pair_count_mean": pseudo_cv["pseudo_pair_count_mean"],
         },
+
         "pseudo_labeling": {
             "enabled": True,
             "anchors_per_menu": ANCHORS_PER_MENU,
@@ -1093,28 +1261,20 @@ def main():
             "min_images_per_menu_for_pseudo": MIN_IMAGES_PER_MENU_FOR_PSEUDO,
             "note": "validation-fold images are excluded from pseudo generation during CV",
         },
-        "xgboost_config": {
-            "n_estimators": 320,
-            "max_depth": 4,
-            "learning_rate": 0.03,
-            "subsample": 0.82,
-            "colsample_bytree": 0.72,
-            "reg_lambda": 4.0,
-            "reg_alpha": 0.2,
-            "min_child_weight": 4,
-            "gamma": 0.25,
-            "random_state": RANDOM_STATE,
-        },
+
+        "xgboost_config": best_xgb_params,
         "classifier": "xgboost",
         "predict_mode": "bidirectional_probability",
         "strict_same_category_check": True,
         "final_sanity_check_accuracy_on_true_pairs": float(true_eval_acc),
+        "base_random_state": BASE_RANDOM_STATE,
     }
 
     with open(METADATA_PATH, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
     print("\n[INFO] Training finished successfully.")
+    print(f"[INFO] Best experiment: {best_experiment['name']}")
     print(f"[INFO] Saved feature extractor to: {FEATURE_EXTRACTOR_PATH}")
     print(f"[INFO] Saved classifier to: {CLASSIFIER_PATH}")
     print(f"[INFO] Saved metadata to: {METADATA_PATH}")

@@ -24,14 +24,14 @@
   ],
   "all_images_used_count": 28891,
   "image_count_per_menu": {
-    "ramen": 5757,
     "pizza": 4473,
     "sushi": 5201,
-    "burger": 8743,
-    "dessert": 4717
+    "ramen": 5757,
+    "dessert": 4717,
+    "burger": 8743
   },
   "true_pair_count": 765,
-  "final_pseudo_pair_count": 1131,
+  "final_pseudo_pair_count": 2349,
   "basic_handcrafted_features": [
     "brightness_mean",
     "brightness_std",
@@ -65,6 +65,211 @@
     "1": "Image 1 wins",
     "0": "Image 2 wins"
   },
+  "best_experiment": {
+    "name": "exp01",
+    "seed": 42,
+    "xgb_params": {
+      "n_estimators": 320,
+      "max_depth": 4,
+      "learning_rate": 0.03,
+      "subsample": 0.82,
+      "colsample_bytree": 0.72,
+      "reg_lambda": 4.0,
+      "reg_alpha": 0.2,
+      "min_child_weight": 4,
+      "gamma": 0.25
+    }
+  },
+  "all_experiment_results": [
+    {
+      "experiment": {
+        "name": "exp01",
+        "seed": 42,
+        "xgb_params": {
+          "n_estimators": 320,
+          "max_depth": 4,
+          "learning_rate": 0.03,
+          "subsample": 0.82,
+          "colsample_bytree": 0.72,
+          "reg_lambda": 4.0,
+          "reg_alpha": 0.2,
+          "min_child_weight": 4,
+          "gamma": 0.25
+        }
+      },
+      "true_only_cross_validation": {
+        "scores": [
+          0.6241830065359477,
+          0.5718954248366013,
+          0.5849673202614379,
+          0.5784313725490197,
+          0.6633986928104575
+        ],
+        "mean_accuracy": 0.6045751633986928,
+        "std_accuracy": 0.03458498445836065
+      },
+      "pseudo_assisted_cross_validation": {
+        "scores": [
+          0.6176470588235294,
+          0.5947712418300654,
+          0.6143790849673203,
+          0.5947712418300654,
+          0.6241830065359477
+        ],
+        "mean_accuracy": 0.6091503267973857,
+        "std_accuracy": 0.012157565514861628,
+        "pseudo_pair_counts": [
+          2408,
+          2406,
+          2404,
+          2405,
+          2408
+        ],
+        "pseudo_pair_count_mean": 2406.2
+      }
+    },
+    {
+      "experiment": {
+        "name": "exp02",
+        "seed": 77,
+        "xgb_params": {
+          "n_estimators": 420,
+          "max_depth": 4,
+          "learning_rate": 0.025,
+          "subsample": 0.85,
+          "colsample_bytree": 0.75,
+          "reg_lambda": 5.0,
+          "reg_alpha": 0.3,
+          "min_child_weight": 4,
+          "gamma": 0.2
+        }
+      },
+      "true_only_cross_validation": {
+        "scores": [
+          0.5882352941176471,
+          0.6274509803921569,
+          0.6339869281045751,
+          0.6535947712418301,
+          0.6274509803921569
+        ],
+        "mean_accuracy": 0.6261437908496732,
+        "std_accuracy": 0.021239316090551522
+      },
+      "pseudo_assisted_cross_validation": {
+        "scores": [
+          0.565359477124183,
+          0.6143790849673203,
+          0.6013071895424836,
+          0.6111111111111112,
+          0.5849673202614379
+        ],
+        "mean_accuracy": 0.5954248366013072,
+        "std_accuracy": 0.01818356567744257,
+        "pseudo_pair_counts": [
+          2404,
+          2407,
+          2408,
+          2407,
+          2405
+        ],
+        "pseudo_pair_count_mean": 2406.2
+      }
+    },
+    {
+      "experiment": {
+        "name": "exp03",
+        "seed": 123,
+        "xgb_params": {
+          "n_estimators": 500,
+          "max_depth": 5,
+          "learning_rate": 0.02,
+          "subsample": 0.8,
+          "colsample_bytree": 0.7,
+          "reg_lambda": 6.0,
+          "reg_alpha": 0.4,
+          "min_child_weight": 5,
+          "gamma": 0.3
+        }
+      },
+      "true_only_cross_validation": {
+        "scores": [
+          0.5915032679738562,
+          0.6078431372549019,
+          0.5784313725490197,
+          0.6274509803921569,
+          0.5882352941176471
+        ],
+        "mean_accuracy": 0.5986928104575163,
+        "std_accuracy": 0.017218222055319574
+      },
+      "pseudo_assisted_cross_validation": {
+        "scores": [
+          0.630718954248366,
+          0.6143790849673203,
+          0.5522875816993464,
+          0.5980392156862745,
+          0.565359477124183
+        ],
+        "mean_accuracy": 0.592156862745098,
+        "std_accuracy": 0.02940450164497252,
+        "pseudo_pair_counts": [
+          2406,
+          2407,
+          2408,
+          2407,
+          2406
+        ],
+        "pseudo_pair_count_mean": 2406.8
+      }
+    },
+    {
+      "experiment": {
+        "name": "exp04",
+        "seed": 999,
+        "xgb_params": {
+          "n_estimators": 280,
+          "max_depth": 3,
+          "learning_rate": 0.04,
+          "subsample": 0.9,
+          "colsample_bytree": 0.8,
+          "reg_lambda": 3.0,
+          "reg_alpha": 0.15,
+          "min_child_weight": 3,
+          "gamma": 0.15
+        }
+      },
+      "true_only_cross_validation": {
+        "scores": [
+          0.6405228758169934,
+          0.5947712418300654,
+          0.6143790849673203,
+          0.49673202614379086,
+          0.5849673202614379
+        ],
+        "mean_accuracy": 0.5862745098039216,
+        "std_accuracy": 0.04863026205944646
+      },
+      "pseudo_assisted_cross_validation": {
+        "scores": [
+          0.6209150326797386,
+          0.5882352941176471,
+          0.6405228758169934,
+          0.5228758169934641,
+          0.565359477124183
+        ],
+        "mean_accuracy": 0.5875816993464053,
+        "std_accuracy": 0.04146078830628418,
+        "pseudo_pair_counts": [
+          2408,
+          2406,
+          2408,
+          2407,
+          2404
+        ],
+        "pseudo_pair_count_mean": 2406.6
+      }
+    }
+  ],
   "true_only_cross_validation": {
     "n_splits": 5,
     "scores": [
@@ -81,27 +286,27 @@
     "n_splits": 5,
     "scores": [
       0.6176470588235294,
-      0.5686274509803921,
-      0.5980392156862745,
-      0.6176470588235294,
-      0.6045751633986928
+      0.5947712418300654,
+      0.6143790849673203,
+      0.5947712418300654,
+      0.6241830065359477
     ],
-    "mean_accuracy": 0.6013071895424836,
-    "std_accuracy": 0.018018364381817302,
+    "mean_accuracy": 0.6091503267973857,
+    "std_accuracy": 0.012157565514861628,
     "pseudo_pair_counts": [
-      1230,
-      1070,
-      1124,
-      1157,
-      1212
+      2408,
+      2406,
+      2404,
+      2405,
+      2408
     ],
-    "pseudo_pair_count_mean": 1158.6
+    "pseudo_pair_count_mean": 2406.2
   },
   "pseudo_labeling": {
     "enabled": true,
     "anchors_per_menu": 16,
-    "max_pseudo_pairs_per_menu": 250,
-    "pseudo_min_score_gap": 0.25,
+    "max_pseudo_pairs_per_menu": 500,
+    "pseudo_min_score_gap": 0.2,
     "pseudo_base_weight": 0.18,
     "min_images_per_menu_for_pseudo": 50,
     "note": "validation-fold images are excluded from pseudo generation during CV"
@@ -115,11 +320,11 @@
     "reg_lambda": 4.0,
     "reg_alpha": 0.2,
     "min_child_weight": 4,
-    "gamma": 0.25,
-    "random_state": 42
+    "gamma": 0.25
   },
   "classifier": "xgboost",
   "predict_mode": "bidirectional_probability",
   "strict_same_category_check": true,
-  "final_sanity_check_accuracy_on_true_pairs": 0.9797385620915032
+  "final_sanity_check_accuracy_on_true_pairs": 0.9679738562091503,
+  "base_random_state": 42
 }

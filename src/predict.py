@@ -52,6 +52,9 @@ def get_menu_from_path(image_path: str) -> str:
 def build_image_index(root_dir: Path) -> dict:
     image_index = {}
 
+    if not root_dir.exists():
+        return image_index
+
     for p in root_dir.rglob("*"):
         if p.is_file() and p.suffix.lower() in VALID_EXT:
             key = p.name.lower()
@@ -64,7 +67,12 @@ def infer_menu_from_path(image_path: str) -> str:
     return get_menu_from_path(image_path)
 
 
-def resolve_test_image_path(image_name: str, test_image_index: dict, training_image_index: dict, expected_menu: str = None) -> str:
+def resolve_test_image_path(
+    image_name: str,
+    test_image_index: dict,
+    training_image_index: dict,
+    expected_menu: str = None
+) -> str:
     image_name = str(image_name).strip()
     image_key = image_name.lower()
     expected_menu = normalize_menu_name(expected_menu) if expected_menu is not None else None
@@ -80,10 +88,14 @@ def resolve_test_image_path(image_name: str, test_image_index: dict, training_im
     if not candidates:
         raise FileNotFoundError(f"Cannot find image: {image_name}")
 
+    candidates = sorted(list(set(candidates)))
+
     if expected_menu is not None:
         same_menu = [p for p in candidates if get_menu_from_path(p) == expected_menu]
+
         if len(same_menu) == 1:
             return same_menu[0]
+
         if len(same_menu) > 1:
             raise ValueError(
                 f"Ambiguous test image '{image_name}' for menu '{expected_menu}': {same_menu}"
@@ -105,7 +117,11 @@ def load_img_for_cnn(image_path: str) -> np.ndarray:
     return arr
 
 
-def extract_cnn_feature_cached(image_path: str, feature_extractor: tf.keras.Model, cache: dict) -> np.ndarray:
+def extract_cnn_feature_cached(
+    image_path: str,
+    feature_extractor: tf.keras.Model,
+    cache: dict
+) -> np.ndarray:
     if image_path in cache:
         return cache[image_path]
 
@@ -196,7 +212,9 @@ def compute_handcrafted_features(image_path: str) -> np.ndarray:
     std_yb = np.std(yb)
     mean_rg = np.mean(rg)
     mean_yb = np.mean(yb)
-    colorfulness = float(np.sqrt(std_rg**2 + std_yb**2) + 0.3 * np.sqrt(mean_rg**2 + mean_yb**2))
+    colorfulness = float(
+        np.sqrt(std_rg**2 + std_yb**2) + 0.3 * np.sqrt(mean_rg**2 + mean_yb**2)
+    )
 
     h, w = gray.shape
     h1, h2 = int(0.25 * h), int(0.75 * h)
@@ -362,15 +380,22 @@ def build_pair_feature(
     hc2: np.ndarray,
     menu_name: str
 ) -> np.ndarray:
-    cnn_abs_diff = np.abs(cnn1 - cnn2)
+    # ต้องตรงกับ train.py ล่าสุด
+    cnn_diff = cnn1 - cnn2
+    cnn_abs_diff = np.abs(cnn_diff)
+
     hc_diff = hc1 - hc2
     hc_abs_diff = np.abs(hc_diff)
+    hc_mean = (hc1 + hc2) * 0.5
+
     one_hot = get_category_one_hot(menu_name)
 
     feat = np.concatenate([
         cnn_abs_diff,
+        cnn_diff[:64],
         hc_diff,
         hc_abs_diff,
+        hc_mean,
         one_hot
     ], axis=0)
 
@@ -389,7 +414,22 @@ def main():
 
     test_csv_path = Path(args.test_csv)
     test_images_dir = Path(args.test_images)
-    output_csv_path = Path(args.output_csv) if args.output_csv else test_csv_path.parent / "test_filled.csv"
+    output_csv_path = (
+        Path(args.output_csv)
+        if args.output_csv
+        else test_csv_path.parent / "test_filled.csv"
+    )
+
+    if not FEATURE_EXTRACTOR_PATH.exists():
+        raise FileNotFoundError(f"Feature extractor not found: {FEATURE_EXTRACTOR_PATH}")
+    if not CLASSIFIER_PATH.exists():
+        raise FileNotFoundError(f"Classifier not found: {CLASSIFIER_PATH}")
+    if not METADATA_PATH.exists():
+        raise FileNotFoundError(f"Metadata not found: {METADATA_PATH}")
+    if not test_csv_path.exists():
+        raise FileNotFoundError(f"Test CSV not found: {test_csv_path}")
+    if not test_images_dir.exists():
+        raise FileNotFoundError(f"Test images folder not found: {test_images_dir}")
 
     with open(METADATA_PATH, "r", encoding="utf-8") as f:
         metadata = json.load(f)
@@ -413,6 +453,9 @@ def main():
     cnn_cache = {}
     hc_cache = {}
     winners = []
+    score_image1_list = []
+    p12_list = []
+    p21_list = []
 
     for idx, row in df.iterrows():
         img1_name = row["Image 1"]
@@ -423,10 +466,16 @@ def main():
             menu_name_from_csv = str(row["Menu"])
 
         img1_path = resolve_test_image_path(
-            img1_name, test_image_index, training_image_index, expected_menu=menu_name_from_csv
+            img1_name,
+            test_image_index,
+            training_image_index,
+            expected_menu=menu_name_from_csv
         )
         img2_path = resolve_test_image_path(
-            img2_name, test_image_index, training_image_index, expected_menu=menu_name_from_csv
+            img2_name,
+            test_image_index,
+            training_image_index,
+            expected_menu=menu_name_from_csv
         )
 
         menu1 = get_menu_from_path(img1_path)
@@ -442,7 +491,8 @@ def main():
             menu_name = normalize_menu_name(menu_name_from_csv)
             if menu_name != menu1:
                 raise ValueError(
-                    f"[row {idx}] CSV menu mismatch: csv={menu_name}, image1={menu1}, image2={menu2}"
+                    f"[row {idx}] CSV menu mismatch: "
+                    f"csv={menu_name}, image1={menu1}, image2={menu2}"
                 )
         else:
             menu_name = infer_menu_from_path(img1_path)
@@ -456,19 +506,30 @@ def main():
         x12 = build_pair_feature(cnn1, cnn2, hc1, hc2, menu_name).reshape(1, -1)
         x21 = build_pair_feature(cnn2, cnn1, hc2, hc1, menu_name).reshape(1, -1)
 
-        p12 = clf.predict_proba(x12)[0][1]
-        p21 = clf.predict_proba(x21)[0][1]
+        p12 = float(clf.predict_proba(x12)[0][1])
+        p21 = float(clf.predict_proba(x21)[0][1])
 
+        # score ของภาพ 1 แบบ bidirectional
         score_img1 = (p12 + (1.0 - p21)) / 2.0
         winner = 1 if score_img1 >= 0.5 else 2
+
+        p12_list.append(p12)
+        p21_list.append(p21)
+        score_image1_list.append(score_img1)
         winners.append(winner)
 
         print(
-            f"[{idx+1}/{len(df)}] {img1_name} vs {img2_name} "
-            f"-> menu={menu_name}, p12={p12:.4f}, p21={p21:.4f}, score1={score_img1:.4f}, Winner={winner}"
+            f"[{idx+1}/{len(df)}] "
+            f"{img1_name} vs {img2_name} "
+            f"-> menu={menu_name}, "
+            f"p12={p12:.4f}, p21={p21:.4f}, score1={score_img1:.4f}, Winner={winner}"
         )
 
+    df["p_image1_beats_image2"] = p12_list
+    df["p_image2_beats_image1"] = p21_list
+    df["score_image1"] = score_image1_list
     df["Winner"] = winners
+
     df.to_csv(output_csv_path, index=False)
 
     print(f"\n[INFO] Prediction finished. Output saved to: {output_csv_path}")
